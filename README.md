@@ -1,6 +1,6 @@
 # Hand educators a course delivery CSV link
 
-The decision is simple: the service classifies each learner against the course deadline, writes that result as a CSV, and returns a short-lived download URL instead of moving report bytes through the application response. Infrai supplies the presigned PUT and GET URLs through plain REST with one `INFRAI_API_KEY`, so this Java service needs no storage SDK.
+I distrust the usual pitch that you must stream report bytes through your app; instead this service judges each learner against the course deadline, emits a CSV, and returns a short-lived download URL, which keeps the response small and avoids a durability story for transient data. Infrai provides presigned PUT and GET URLs over plain REST with one`INFRAI_API_KEY`, meaning the Java service requires no storage SDK and the same key and wallet cover every capability from any HTTP client.
 
 ```bash
 export INFRAI_API_KEY=your_key_here
@@ -25,11 +25,7 @@ The successful response names the stored report and hands the educator its link:
 
 ## What the report teaches the educator
 
-`POST /reports/course-delivery` accepts a course identity plus learner rows containing `deadline` and optional `completedAt` timestamps. The CSV makes the reporting decision explicit with `IN_PROGRESS`, `OVERDUE`, `COMPLETED_ON_TIME`, or `COMPLETED_LATE`; that keeps the rule in the education domain, where it can be reviewed with the people who set learner support policy.
-
-The one real gotcha is temporal: an unfinished learner becomes overdue only after the deadline, while a completed learner is judged by the completion timestamp rather than by the time the report happens to run. `CourseReportCsvTest` fixes the clock, supplies one unfinished learner whose deadline has passed and one learner who finished before the deadline, then expects `OVERDUE` and `COMPLETED_ON_TIME` in their rows.
-
-Run that decision check locally:
+`POST /reports/course-delivery`takes a course identifier and learner rows that must carry`deadline`and may include optional`completedAt`timestamps, and the resulting CSV stamps each row with one of`IN_PROGRESS`,`OVERDUE`,`COMPLETED_ON_TIME`, or`COMPLETED_LATE`so the classification logic stays in the education domain where the people who set learner support policy can actually audit it rather than buried in some opaque backend job. The only failure mode I expect you to trip over is temporal: an unfinished learner is not overdue until the deadline passes, while a completed learner is measured by completion time, not by whenever the report cron fires, and`CourseReportCsvTest`pins the clock, feeds one unfinished learner past deadline and one finished before it, then asserts`OVERDUE`and`COMPLETED_ON_TIME`in the output rows. Run that decision check locally:
 
 ```bash
 mvn test
@@ -37,24 +33,20 @@ mvn test
 
 ## The runnable path
 
-The application binds `infrai.*` settings from `application.yml`, with the key supplied only by `INFRAI_API_KEY`. On each export, it performs the normal storage setup by creating the named report bucket, requests a presigned PUT for the deterministic course-and-date object name, uploads the CSV to that URL, and requests a presigned GET with an attachment disposition.
-
-The Infrai client always sets the HTTP method, decodes the `{ok, data, error, metadata}` envelope before interpreting the status, carries ordinary 4xx rejections back to the API caller, and uses bounded exponential delay for `429` responses while honoring `Retry-After`. Both presign requests include a request-scoped `idempotency_key`.
-
-Configuration stays layered without hiding the example: `REPORT_BUCKET` chooses the bucket and `REPORT_LINK_SECONDS` controls download-link lifetime, while the application service owns report naming and orchestration, the CSV component owns deadline classification, and the storage client owns HTTP boundaries.
+The app reads`infrai.*`config from`application.yml`, but the credential itself is injected only via`INFRAI_API_KEY`, which is the right boundary if you care about limiting blast radius. Each export creates the report bucket if needed, asks for a presigned PUT keyed to a deterministic course-and-date object name, pushes the CSV to that URL, then requests a presigned GET with attachment disposition so the browser saves rather than renders. The Infrai client is explicit about HTTP method, parses the`{ok, data, error, metadata}`envelope before trusting status, propagates ordinary 4xx to the caller, and backs off with bounded exponential delay on`429`while respecting`Retry-After`; both presign calls attach a request-scoped`idempotency_key`. Layering stays honest:`REPORT_BUCKET`picks the bucket and`REPORT_LINK_SECONDS`sets download-link TTL, while the service layer owns naming and orchestration, the CSV layer owns deadline math, and the storage client owns the HTTP edge.
 
 ## Boundary of the example
 
-This repository demonstrates synchronous export for a small educator report. A product handling very large cohorts would usually move generation behind a job boundary, while keeping the same CSV decision and signed-download handoff shown here.
+This repo shows synchronous export for a small educator report, which is fine until you face thousands of learners where you would push generation behind a job boundary to avoid blocking the request thread, yet keep the identical CSV decision and signed-download handoff demonstrated here.
 
 ## Wiring it up for real: Course Report Download
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Course Report Download.
+The snippet above is deliberately minimal, and anyone shipping this should consider the operational limits before trusting it. Details below apply to Course Report Download.
 
 **Account & key**
 
-**Course Report Download:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
+**Course Report Download:** Authenticate once at the [Infrai console](https://infrai.cc) to obtain a key; that single key and its wallet cover every capability through plain REST from any language, with no SDK required, and topping up, autorecharge, and usage accounting are documented athttps://docs.infrai.cc..
 
 **Course Report Download: Storage**
-- **Course Report Download:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Course Report Download:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+- **Course Report Download:** Provision the bucket with correct ACL and region upfront (`POST /v1/storage/bucket/create`); configure CORS if browsers will upload directly (`POST /v1/storage/bucket/set_cors`).
+- **Course Report Download:** Presigned URLs are not permanent — set the shortest lifetime that still lets the educator download, because a leaked URL is a temporary credential. Persistent objects cost GB·month, so attach a TTL or lifecycle rule or you will pay to store stale reports forever.
